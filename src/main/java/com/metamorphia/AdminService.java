@@ -7,9 +7,9 @@ import org.telegram.telegrambots.meta.api.methods.groupadministration.CreateChat
 
 public class AdminService {
 
-    // Твой ID — админ по умолчанию, плюс все из таблицы admins
+    // Дмитрий — админ по умолчанию + все из таблицы admins
     private static boolean isAdmin(long userId) throws Exception {
-        if (userId == 726773708L) return true; // <-- Дмитрий по умолчанию админ
+        if (userId == 726773708L) return true; // <-- твой ID
         try (var ps = DB.get().prepareStatement("SELECT 1 FROM admins WHERE user_id=?")) {
             ps.setLong(1, userId);
             try (var rs = ps.executeQuery()) { return rs.next(); }
@@ -33,26 +33,21 @@ public class AdminService {
 
     public static void handleSetGroup(AbsSender bot, Message msg) throws Exception {
         long me = msg.getFrom().getId();
-        if (!isAdmin(me)) {
-            bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Нет прав").build());
-            return;
-        }
+        if (!isAdmin(me)) { bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Нет прав").build()); return; }
         var parts = msg.getText().trim().split("\\s+");
         if (parts.length < 2) {
-            bot.execute(SendMessage.builder().chatId(msg.getChatId())
-                    .text("Использование: /setgroup <channel_id|@username>").build());
+            bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Использование: /setgroup <channel_id|@username>").build());
             return;
         }
-
         String raw = parts[1];
         String channelId = raw;
 
-        // Поддержка @username -> резолвим в numeric id
+        // поддержка @username: резолвим в numeric id
         if (raw.startsWith("@")) {
             try {
                 var get = new org.telegram.telegrambots.meta.api.methods.groupadministration.GetChat(raw);
                 var chat = bot.execute(get);
-                channelId = chat.getId().toString(); // numeric id, обычно -100xxxxxxxxxxxx
+                channelId = chat.getId().toString();
             } catch (Exception e) {
                 bot.execute(SendMessage.builder().chatId(msg.getChatId())
                         .text("Не удалось определить ID канала по " + raw + ": " + e.getMessage()).build());
@@ -60,10 +55,9 @@ public class AdminService {
             }
         }
 
-        // Сохраним канал
         DB.put("channel_id", channelId);
 
-        // Пытаемся создать ссылку-заявку (бот ДОЛЖЕН быть админом канала)
+        // создаём ссылку-заявку (бот должен быть админом канала)
         try {
             var req = CreateChatInviteLink.builder()
                     .chatId(channelId)
@@ -75,7 +69,7 @@ public class AdminService {
 
             bot.execute(SendMessage.builder().chatId(msg.getChatId())
                     .text("Канал установлен: " + channelId + "\nСсылка-заявка: " + link
-                            + "\nУбедитесь, что бот админ канала с правами «Приглашать» и «Одобрять заявки».")
+                            + "\nПроверьте, что бот админ канала с правами «Приглашать» и «Одобрять заявки».")
                     .build());
         } catch (Exception e) {
             bot.execute(SendMessage.builder().chatId(msg.getChatId())

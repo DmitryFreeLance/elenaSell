@@ -1,32 +1,34 @@
 package com.metamorphia;
 
 import org.telegram.telegrambots.meta.TelegramBotsApi;
+import org.telegram.telegrambots.meta.api.objects.ChatJoinRequest;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
-
 import org.telegram.telegrambots.meta.api.objects.Update;
-import org.telegram.telegrambots.meta.api.objects.ChatJoinRequest;
-
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.*;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.*;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-
-// ДОБАВЬ/ИСПРАВЬ:
 import org.telegram.telegrambots.meta.api.methods.invoices.SendInvoice;
 import org.telegram.telegrambots.meta.api.methods.AnswerPreCheckoutQuery;
-
 import org.telegram.telegrambots.meta.api.objects.payments.LabeledPrice;
+import org.telegram.telegrambots.meta.api.objects.payments.SuccessfulPayment;
 
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Bot extends TelegramLongPollingBot {
     private static final String TOKEN      = System.getenv("BOT_TOKEN");
     private static final String USERNAME   = System.getenv("BOT_USERNAME");
-    private static final String PROVIDER   = System.getenv("TG_PROVIDER_TOKEN"); // токен ЮKassa из BotFather
+    private static final String PROVIDER   = System.getenv("TG_PROVIDER_TOKEN"); // токен провайдера (ЮKassa через BotFather)
+
+    // антидубль нажатия «Оплатить»
+    private static final Map<Long, Long> lastPayClickTs = new ConcurrentHashMap<>();
+    private static final long PAY_COOLDOWN_MS = 15_000; // 15 секунд
 
     public static void start() throws Exception {
         TelegramBotsApi api = new TelegramBotsApi(DefaultBotSession.class);
@@ -41,59 +43,47 @@ public class Bot extends TelegramLongPollingBot {
     @Override
     public void onUpdateReceived(Update update) {
         try {
-            // 1) PreCheckoutQuery ОБЯЗАТЕЛЕН
+            // === 1) PreCheckoutQuery (обязателен) ===
             if (update.hasPreCheckoutQuery()) {
                 var pq = update.getPreCheckoutQuery();
                 execute(AnswerPreCheckoutQuery.builder()
                         .preCheckoutQueryId(pq.getId())
-                        .ok(true) // можно ok=false и errorMessage, если нужно отклонить
+                        .ok(true)
                         .build());
                 return;
             }
 
-            // 2) Успешная оплата: активируем подписку и выдаём ссылку
+            // === 2) Успешная оплата ===
             if (update.hasMessage() && update.getMessage().hasSuccessfulPayment()) {
                 var msg = update.getMessage();
                 var user = msg.getFrom();
                 long userId = user.getId();
-                var sp = msg.getSuccessfulPayment();
-                String paymentId = sp.getTelegramPaymentChargeId(); // можно сохранить
+                SuccessfulPayment sp = msg.getSuccessfulPayment();
+                String paymentId = sp.getTelegramPaymentChargeId(); // ID в Telegram
 
-                // гарантируем наличие пользователя (FK)
+                // гарантируем наличие пользователя (для FK)
                 DB.upsertUser(userId, user.getUserName(), user.getFirstName(), user.getLastName());
 
                 // активируем подписку на 30 дней
                 SubscriptionService.activate(userId, paymentId);
 
-                // выдаём ссылку: по умолчанию — заявка (request_link), либо раскомментируй "одноразовую" ниже
+                // выдаём ссылку: по умолчанию — заявка (request_link)
                 String link = DB.get("request_link");
-
-                // --- одноразовая ссылка (альтернатива): раскомментируй, если нужно вместо заявки ---
-                // String channelId = DB.get("channel_id");
-                // long expire = Instant.now().getEpochSecond() + 86400; // 24 часа
-                // var req = CreateChatInviteLink.builder()
-                //         .chatId(channelId)
-                //         .name("One-time access")
-                //         .memberLimit(1)
-                //         .expireDate((int) expire)
-                //         .build();
-                // link = execute(req).getInviteLink();
-                // -------------------------------------------------------------------------------
 
                 execute(SendMessage.builder()
                         .chatId(userId)
-                        .text("Оплата прошла успешно ✅\nСсылка для входа в канал: " + link + "\nЕсли ссылка истекла — нажмите /my_sub.")
+                        .text("Оплата прошла успешно ✅\nСсылка для входа в канал: " + link)
                         .build());
                 return;
             }
 
-            // 3) Тексты, команды, коллбэки
+            // === 3) Тексты/команды ===
             if (update.hasMessage() && update.getMessage().hasText()) {
                 var msg = update.getMessage();
                 var text = msg.getText().trim();
                 var user = msg.getFrom();
 
-                // пишущий пользователь — в БД
+                // логируем пользователя
                 DB.upsertUser(user.getId(), user.getUserName(), user.getFirstName(), user.getLastName());
 
                 if (text.startsWith("/start")) {
@@ -108,7 +98,7 @@ public class Bot extends TelegramLongPollingBot {
                     AdminService.handleAdminAdd(this, msg);
                     return;
                 }
-                if (text.startsWith("/setgroup")) { // /setgroup -1001234567890
+                if (text.startsWith("/setgroup")) { // /setgroup -1001234567890  или /setgroup @username
                     AdminService.handleSetGroup(this, msg);
                     return;
                 }
@@ -122,24 +112,51 @@ public class Bot extends TelegramLongPollingBot {
                 }
             }
 
-            // Inline кнопки
+            // === 4) Inline-кнопки ===
             if (update.hasCallbackQuery()) {
                 var cq = update.getCallbackQuery();
                 var data = cq.getData();
 
-                if (data.equals("pay")) {
-                    // отправляем инвойс
-                    sendInvoice(cq.getMessage().getChatId().toString(), cq.getFrom().getId());
-                } else if (data.equals("support")) {
+                // Всегда отвечаем на callback, чтобы Telegram не ретраил
+                try {
+                    execute(AnswerCallbackQuery.builder()
+                            .callbackQueryId(cq.getId())
+                            .cacheTime(2)
+                            .build());
+                } catch (Exception ignore) {}
+
+                if ("pay".equals(data)) {
+                    long uid = cq.getFrom().getId();
+                    long now = System.currentTimeMillis();
+                    long last = lastPayClickTs.getOrDefault(uid, 0L);
+                    if (now - last < PAY_COOLDOWN_MS) {
+                        // мягко сообщим, что инвойс уже отправлен
+                        try {
+                            execute(AnswerCallbackQuery.builder()
+                                    .callbackQueryId(cq.getId())
+                                    .text("Инвойс уже отправлен 👌")
+                                    .showAlert(false)
+                                    .build());
+                        } catch (Exception ignore) {}
+                        return;
+                    }
+                    lastPayClickTs.put(uid, now);
+                    sendInvoice(cq.getMessage().getChatId().toString(), uid);
+                    return;
+                }
+
+                if ("support".equals(data)) {
+                    // Кнопка перенаправляет к чату с поддержкой
                     execute(SendMessage.builder()
                             .chatId(cq.getMessage().getChatId())
-                            .text("Поддержка: @your_support_handle")
+                            .text("Перейдите в чат с поддержкой: [@SpringvestaJiva](tg://resolve?domain=SpringvestaJiva)")
+                            .parseMode("Markdown")
                             .build());
+                    return;
                 }
-                return;
             }
 
-            // заявки в канал — автоапрув по активной подписке
+            // === 5) Заявки в канал — автоапрув при активной подписке ===
             if (update.hasChatJoinRequest()) {
                 ChatJoinRequest r = update.getChatJoinRequest();
                 long userId = r.getUser().getId();
@@ -167,16 +184,14 @@ public class Bot extends TelegramLongPollingBot {
     }
 
     private void sendStart(Long chatId) throws Exception {
-        // цена из настроек
-        String price = DB.get("price_rub");
-        if (price == null) price = "5000";
+        String price = Optional.ofNullable(DB.get("price_rub")).orElse("5000");
 
         String text = """
     ✨ Превращение начинается здесь.
 
     Metamorphia — это пространство глубоких трансформаций, практик и знаний 𓋹.
 
-    Чтобы сохранить качество контента※ и атмосферу сообщества, канал является платным.
+    Чтобы сохранить качество контента и атмосферу сообщества, канал является платным.
 
     Стоимость доступа: %s рублей
 
@@ -193,7 +208,7 @@ public class Bot extends TelegramLongPollingBot {
 
         InlineKeyboardMarkup kb = new InlineKeyboardMarkup(List.of(
                 List.of(InlineKeyboardButton.builder().text("🏛️ Оплатить " + price + " руб.").callbackData("pay").build()),
-                List.of(InlineKeyboardButton.builder().text("📞 Связь с поддержкой").callbackData("support").build())
+                List.of(InlineKeyboardButton.builder().text("📞 Связь с поддержкой").url("tg://resolve?domain=SpringvestaJiva").build())
         ));
         execute(SendMessage.builder().chatId(chatId).text(text).replyMarkup(kb).build());
     }
@@ -223,33 +238,28 @@ public class Bot extends TelegramLongPollingBot {
                 .build());
     }
 
-    /** Отправка инвойса через Telegram Payments (ЮKassa) */
+    /** Отправка инвойса через Telegram Payments (ЮKassa). */
     private void sendInvoice(String chatId, long userId) throws Exception {
-        String provider = System.getenv("TG_PROVIDER_TOKEN");
-        if (provider == null || provider.isBlank()) {
+        if (PROVIDER == null || PROVIDER.isBlank()) {
             execute(SendMessage.builder()
                     .chatId(chatId)
-                    .text("Платежи временно недоступны: отсутствует TG_PROVIDER_TOKEN. Обратитесь в поддержку.")
+                    .text("Платежи временно недоступны. Обратитесь в поддержку.")
                     .build());
             return;
         }
-
-        int amountRub = Integer.parseInt(java.util.Optional.ofNullable(DB.get("price_rub")).orElse("5000"));
-        java.util.List<LabeledPrice> prices =
-                java.util.List.of(new LabeledPrice("Доступ на месяц", amountRub * 100)); // копейки
-
+        int amountRub = Integer.parseInt(Optional.ofNullable(DB.get("price_rub")).orElse("5000"));
+        List<LabeledPrice> prices = List.of(new LabeledPrice("Доступ на месяц", amountRub * 100)); // копейки
         String payload = "meta-" + userId + "-" + System.currentTimeMillis();
 
         SendInvoice invoice = SendInvoice.builder()
                 .chatId(chatId)
                 .title("Metamorphia — доступ на месяц")
-                .description("Подписка на 30 дней в закрытый канал")
+                .description("Доступ на 30 дней к материалам и сообществу. После оплаты бот пришлёт приглашение.")
                 .payload(payload)
-                .providerToken(provider)
+                .providerToken(PROVIDER)
                 .currency("RUB")
                 .prices(prices)
-                .startParameter("metamorphia") // <-- ОБЯЗАТЕЛЬНО, иначе NPE
-                // .providerData(providerDataJson) // если понадобится чек 54-ФЗ
+                .startParameter("metamorphia") // обязательно, иначе NPE
                 .build();
 
         execute(invoice);
