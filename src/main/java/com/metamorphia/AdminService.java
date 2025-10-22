@@ -6,7 +6,10 @@ import org.telegram.telegrambots.meta.bots.AbsSender;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.CreateChatInviteLink;
 
 public class AdminService {
+
+    // Твой ID — админ по умолчанию, плюс все из таблицы admins
     private static boolean isAdmin(long userId) throws Exception {
+        if (userId == 726773708L) return true; // <-- Дмитрий по умолчанию админ
         try (var ps = DB.get().prepareStatement("SELECT 1 FROM admins WHERE user_id=?")) {
             ps.setLong(1, userId);
             try (var rs = ps.executeQuery()) { return rs.next(); }
@@ -39,7 +42,7 @@ public class AdminService {
         String channelId = parts[1]; // пример: -1001234567890
         DB.put("channel_id", channelId);
 
-        // Создаем инвайт-ссылку с creates_join_request = true
+        // Создаем инвайт-ссылку с createsJoinRequest = true (режим ЗАЯВОК)
         var req = CreateChatInviteLink.builder()
                 .chatId(channelId)
                 .createsJoinRequest(true)
@@ -49,7 +52,7 @@ public class AdminService {
         DB.put("request_link", link);
 
         bot.execute(SendMessage.builder().chatId(msg.getChatId())
-                .text("Канал установлен. Ссылка-заявка: " + link + "\nДобавьте бота админом канала с правами: «Приглашать по ссылкам» и «Одобрять заявки».")
+                .text("Канал установлен. Ссылка-заявка: " + link + "\nДобавьте бота админом канала с правами: «Приглашать» и «Одобрять заявки».")
                 .build());
     }
 
