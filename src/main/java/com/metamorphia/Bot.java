@@ -225,22 +225,31 @@ public class Bot extends TelegramLongPollingBot {
 
     /** Отправка инвойса через Telegram Payments (ЮKassa) */
     private void sendInvoice(String chatId, long userId) throws Exception {
-        int amountRub = Integer.parseInt(Optional.ofNullable(DB.get("price_rub")).orElse("5000"));
+        String provider = System.getenv("TG_PROVIDER_TOKEN");
+        if (provider == null || provider.isBlank()) {
+            execute(SendMessage.builder()
+                    .chatId(chatId)
+                    .text("Платежи временно недоступны: отсутствует TG_PROVIDER_TOKEN. Обратитесь в поддержку.")
+                    .build());
+            return;
+        }
 
-        List<LabeledPrice> prices = List.of(new LabeledPrice("Доступ на месяц", amountRub * 100)); // копейки
+        int amountRub = Integer.parseInt(java.util.Optional.ofNullable(DB.get("price_rub")).orElse("5000"));
+        java.util.List<LabeledPrice> prices =
+                java.util.List.of(new LabeledPrice("Доступ на месяц", amountRub * 100)); // копейки
 
-        String payload = "meta-" + userId + "-" + System.currentTimeMillis(); // уникально для тебя
+        String payload = "meta-" + userId + "-" + System.currentTimeMillis();
 
         SendInvoice invoice = SendInvoice.builder()
                 .chatId(chatId)
                 .title("Metamorphia — доступ на месяц")
                 .description("Подписка на 30 дней в закрытый канал")
                 .payload(payload)
-                .providerToken(PROVIDER) // токен провайдера из BotFather (ЮKassa)
+                .providerToken(provider)
                 .currency("RUB")
                 .prices(prices)
-                // Если нужны реквизиты для чека (54-ФЗ) — добавь providerData с JSON 'receipt'
-                .needName(false).needEmail(false).needPhoneNumber(false)
+                .startParameter("metamorphia") // <-- ОБЯЗАТЕЛЬНО, иначе NPE
+                // .providerData(providerDataJson) // если понадобится чек 54-ФЗ
                 .build();
 
         execute(invoice);

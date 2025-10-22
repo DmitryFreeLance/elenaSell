@@ -33,27 +33,56 @@ public class AdminService {
 
     public static void handleSetGroup(AbsSender bot, Message msg) throws Exception {
         long me = msg.getFrom().getId();
-        if (!isAdmin(me)) { bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Нет прав").build()); return; }
-        var parts = msg.getText().trim().split("\\s+");
-        if (parts.length < 2) {
-            bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Использование: /setgroup <channel_id>").build());
+        if (!isAdmin(me)) {
+            bot.execute(SendMessage.builder().chatId(msg.getChatId()).text("Нет прав").build());
             return;
         }
-        String channelId = parts[1]; // пример: -1001234567890
+        var parts = msg.getText().trim().split("\\s+");
+        if (parts.length < 2) {
+            bot.execute(SendMessage.builder().chatId(msg.getChatId())
+                    .text("Использование: /setgroup <channel_id|@username>").build());
+            return;
+        }
+
+        String raw = parts[1];
+        String channelId = raw;
+
+        // Поддержка @username -> резолвим в numeric id
+        if (raw.startsWith("@")) {
+            try {
+                var get = new org.telegram.telegrambots.meta.api.methods.groupadministration.GetChat(raw);
+                var chat = bot.execute(get);
+                channelId = chat.getId().toString(); // numeric id, обычно -100xxxxxxxxxxxx
+            } catch (Exception e) {
+                bot.execute(SendMessage.builder().chatId(msg.getChatId())
+                        .text("Не удалось определить ID канала по " + raw + ": " + e.getMessage()).build());
+                return;
+            }
+        }
+
+        // Сохраним канал
         DB.put("channel_id", channelId);
 
-        // Создаем инвайт-ссылку с createsJoinRequest = true (режим ЗАЯВОК)
-        var req = CreateChatInviteLink.builder()
-                .chatId(channelId)
-                .createsJoinRequest(true)
-                .name("Metamorphia access")
-                .build();
-        var link = bot.execute(req).getInviteLink();
-        DB.put("request_link", link);
+        // Пытаемся создать ссылку-заявку (бот ДОЛЖЕН быть админом канала)
+        try {
+            var req = CreateChatInviteLink.builder()
+                    .chatId(channelId)
+                    .createsJoinRequest(true)
+                    .name("Metamorphia access")
+                    .build();
+            var link = bot.execute(req).getInviteLink();
+            DB.put("request_link", link);
 
-        bot.execute(SendMessage.builder().chatId(msg.getChatId())
-                .text("Канал установлен. Ссылка-заявка: " + link + "\nДобавьте бота админом канала с правами: «Приглашать» и «Одобрять заявки».")
-                .build());
+            bot.execute(SendMessage.builder().chatId(msg.getChatId())
+                    .text("Канал установлен: " + channelId + "\nСсылка-заявка: " + link
+                            + "\nУбедитесь, что бот админ канала с правами «Приглашать» и «Одобрять заявки».")
+                    .build());
+        } catch (Exception e) {
+            bot.execute(SendMessage.builder().chatId(msg.getChatId())
+                    .text("Не удалось создать ссылку. Причина: " + e.getMessage()
+                            + "\nПроверьте:\n• Бот добавлен админом канала\n• Есть права «Приглашать» и «Одобрять заявки»\n• ID корректный (обычно начинается с -100)")
+                    .build());
+        }
     }
 
     public static void handlePrice(AbsSender bot, Message msg) throws Exception {
