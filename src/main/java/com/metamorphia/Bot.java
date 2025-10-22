@@ -21,7 +21,9 @@ public class Bot extends TelegramLongPollingBot {
 
     public static void start() throws Exception {
         TelegramBotsApi api = new TelegramBotsApi(DefaultBotSession.class);
-        api.registerBot(new Bot());
+        Bot bot = new Bot();
+        api.registerBot(bot);
+        BotSender.set(bot); // <-- ВАЖНО! иначе отправка из вебхука рухнет
     }
 
     @Override public String getBotToken() { return TOKEN; }
